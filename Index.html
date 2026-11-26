@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#121212">
+<meta name="mobile-web-app-capable" content="yes">
+<title>SoundGuard Monitor</title>
+<link rel="manifest" id="pwa-manifest">
+<script src="https://unpkg.com"></script>
+<style>
+• { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; }
+body { background: #121212; color: #fff; margin: 0; padding: 16px; text-align: center; }
+h2 { margin-top: 8px; }
+.tabs { display: flex; max-width: 420px; margin: 0 auto 16px; background: #1e1e1e; border-radius: 10px; padding: 4px; }
+.tab { flex: 1; padding: 10px; border: none; background: transparent; color: #aaa; font-weight: bold; border-radius: 8px; cursor: pointer; }
+.tab.active { background: #007bff; color: #fff; }
+.card { background: #1e1e1e; padding: 20px; border-radius: 14px; max-width: 420px; margin: 0 auto; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+.hidden { display: none; }
+input { width: 100%; padding: 14px; margin: 8px 0; border-radius: 10px; border: 1px solid #333; background: #262626; color: #fff; font-size: 16px; }
+button.action { width: 100%; padding: 14px; margin-top: 10px; border-radius: 10px; border: none; background: #007bff; color: #fff; font-size: 16px; font-weight: bold; cursor: pointer; }
+button.stop { background: #dc3545; }
+#meter-bg { width: 100%; height: 26px; background: #2c2c2c; margin: 16px 0; border-radius: 13px; overflow: hidden; }
+#meter-fill { height: 100%; width: 0%; background: #28a745; transition: width 0.08s; }
+.status { font-size: 14px; color: #bbb; margin-top: 12px; min-height: 20px; }
+</style>
+</head>
+<body>
+
+<h2>🔊 SoundGuard</h2>
+
+<div class="tabs">
+<button class="tab active" id="tabMon" onclick="switchTab('mon')">Tablet Monitor</button>
+<button class="tab" id="tabLis" onclick="switchTab('lis')">Phone Listener</button>
+</div>
+
+<!-- TABLET MONITOR VIEW -->
+<div class="card" id="viewMon">
+<p style="color:#aaa; font-size:14px; margin-top:0;">Leave this running on your tablet to detect loud sounds and stream the mic.</p>
+<input type="text" id="ntfyTopic" placeholder="Secret Alert Topic (e.g. tab-alert-9921)">
+<input type="text" id="roomId" placeholder="Room ID (e.g. room55)">
+<div style="text-align:left; margin-top:10px;">
+<label>Loudness Trigger: <b><span id="threshVal">40</span>%</b></label>
+<input type="range" id="threshold" min="5" max="95" value="40" oninput="document.getElementById('threshVal').innerText=this.value">
+</div>
+<div id="meter-bg"><div id="meter-fill"></div></div>
+<button class="action" id="startBtn" onclick="startMonitor()">Start Monitoring</button>
+<div class="status" id="monStatus">Ready to start</div>
+</div>
+
+<!-- PHONE LISTENER VIEW -->
+<div class="card hidden" id="viewLis">
+<p style="color:#aaa; font-size:14px; margin-top:0;">Use this mode on your Samsung A23 (or test in a second tab) to hear the tablet's mic live.</p>
+<input type="text" id="listenRoomId" placeholder="Enter Room ID (e.g. room55)">
+<button class="action" onclick="startListening()">Connect & Listen Live</button>
+<audio id="remoteAudio" autoplay playsinline></audio>
+<div class="status" id="listenStatus">Disconnected</div>
+</div>
+
+<script>
+// Generate dynamic PWA Manifest so Chrome lets you install this single file as an App
+const manifest = {
+name: "SoundGuard Monitor",
+short_name: "SoundGuard",
+start_url: location.href,
+display: "standalone",
+background_color: "#121212",
+theme_color: "#121212",
+icons: [{
+src: "data:image/svg+xml;base64," + btoa('<svg xmlns="http://w3.org" viewBox="0 0 100 100"><rect width="100" height="100" rx="20" fill="#007bff"/><text x="50" y="65" font-size="50" text-anchor="middle" fill="white">🔊</text></svg>'),
+sizes: "192x192",
+type: "image/svg+xml"
+}]
+};
+document.getElementById('pwa-manifest').setAttribute('href', 'data:application/manifest+json,' + encodeURIComponent(JSON.stringify(manifest)));
+
+// Load saved settings
+document.getElementById('ntfyTopic').value = localStorage.getItem('sg_topic') || '';
+document.getElementById('roomId').value = localStorage.getItem('sg_room') || '';
+document.getElementById('listenRoomId').value = localStorage.getItem('sg_room') || '';
+
+function switchTab(mode) {
+document.getElementById('tabMon').classList.toggle('active', mode === 'mon');
+document.getElementById('tabLis').classList.toggle('active', mode === 'lis');
+document.getElementById('viewMon').classList.toggle('hidden', mode !== 'mon');
+document.getElementById('viewLis').classList.toggle('hidden', mode !== 'lis');
+}
+
+let audioCtx, analyser, micStream, peer;
+let lastAlertTime = 0;
+let isMonitoring = false;
+
+async function startMonitor() {
+if (isMonitoring) return location.reload();
+const topic = document.getElementById('ntfyTopic').value.trim();
+const room = document.getElementById('roomId').value.trim();
+if (!topic || !room) return alert("Please enter both a Secret Alert Topic and a Room ID.");
+
+localStorage.setItem('sg_topic', topic);
+localStorage.setItem('sg_room', room);
+
+try {
+if ('wakeLock' in navigator) { navigator.wakeLock.request('screen').catch(()=>{}); }
+micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+const source = audioCtx.createMediaStreamSource(micStream);
+analyser = audioCtx.createAnalyser();
+analyser.fftSize = 256;
+source.connect(analyser);
+
+peer = new Peer('sg-mon-' + room);
+peer.on('open', () => {
+document.getElementById('monStatus').innerText = "✅ Listening for loud sounds...";
+document.getElementById('startBtn').innerText = "Stop Monitoring";
+document.getElementById('startBtn').classList.add('stop');
+isMonitoring = true;
+checkVolume(topic);
+});
+
+peer.on('error', (err) => {
+document.getElementById('monStatus').innerText = "Connection note: " + err.type;
+});
+
+peer.on('call', (call) => {
+call.answer(micStream);
+document.getElementById('monStatus').innerText = "🔴 Live audio streaming to listener!";
+});
+} catch (err) {
+alert("Microphone blocked. Make sure you opened this via an HTTPS link and clicked Allow.");
+}
+}
+
+function checkVolume(topic) {
+const data = new Uint8Array(analyser.frequencyBinCount);
+function loop() {
+if (!isMonitoring) return;
+analyser.getByteFrequencyData(data);
+let sum = 0;
+for (let i = 0; i < data.length; i++) sum += data[i];
+let avg = Math.min(100, Math.round((sum / data.length) * 1.5));
+
+const fill = document.getElementById('meter-fill');
+fill.style.width = avg + '%';
+const thresh = parseInt(document.getElementById('threshold').value);
+fill.style.background = avg > thresh ? '#dc3545' : '#28a745';
+
+if (avg > thresh && (Date.now() - lastAlertTime > 25000)) {
+lastAlertTime = Date.now();
+document.getElementById('monStatus').innerText = "⚠️ Loud sound (" + avg + "%)! Alert sent.";
+fetch('https://ntfy.sh' + topic, {
+method: 'POST',
+body: 'Loud sound detected (' + avg + '%)! Open SoundGuard to listen live.',
+headers: { 'Title': 'SoundGuard Alert', 'Priority': 'high', 'Tags': 'loudspeaker' }
+});
+}
+requestAnimationFrame(loop);
+}
+loop();
+}
+
+function startListening() {
+const room = document.getElementById('listenRoomId').value.trim();
+if (!room) return alert("Enter the Room ID!");
+localStorage.setItem('sg_room', room);
+document.getElementById('listenStatus').innerText = "Connecting to tablet...";
+
+const listenerPeer = new Peer();
+listenerPeer.on('open', () => {
+const ctx = new (window.AudioContext || window.webkitAudioContext)();
+const dest = ctx.createMediaStreamDestination();
+const call = listenerPeer.call('sg-mon-' + room, dest.stream);
+
+call.on('stream', (remoteStream) => {
+const audio = document.getElementById('remoteAudio');
+audio.srcObject = remoteStream;
+audio.play();
+document.getElementById('listenStatus').innerText = "🔊 Connected! Hearing live mic audio.";
+});
+});
+}
+</script>
+</body>
+</html>
